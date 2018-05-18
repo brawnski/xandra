@@ -168,6 +168,8 @@ defmodule Xandra do
     idle_timeout: 30_000,
   ]
 
+  defstruct [:conn, :pool]
+
   @doc """
   Starts a new connection or pool of connections to Cassandra.
 
@@ -256,7 +258,16 @@ defmodule Xandra do
       |> Keyword.merge(options)
       |> parse_start_options()
       |> Keyword.put(:prepared_cache, Prepared.Cache.new)
-    DBConnection.start_link(Connection, options)
+      # |> Keyword.put_new(:pool, DBConnection.Connection)
+
+    with {:ok, conn} <- DBConnection.start_link(Connection, options) do
+      pool = Keyword.get(options, :pool)
+      if name = Keyword.get(options, :name) do
+        __MODULE__.Registry.associate(name, pool)
+      end
+
+      {:ok, %__MODULE__{conn: conn, pool: pool}}
+    end
   end
 
   @doc """
@@ -362,6 +373,7 @@ defmodule Xandra do
   """
   @spec prepare(conn, statement, Keyword.t) :: {:ok, Prepared.t} | {:error, error}
   def prepare(conn, statement, options \\ []) when is_binary(statement) do
+    {conn, options} = unwrap(conn, options)
     DBConnection.prepare(conn, %Prepared{statement: statement}, options)
   end
 
@@ -708,6 +720,7 @@ defmodule Xandra do
   """
   @spec run(conn, Keyword.t, (conn -> result)) :: result when result: var
   def run(conn, options \\ [], fun) when is_function(fun, 1) do
+    {conn, options} = unwrap(conn, options)
     DBConnection.run(conn, fun, options)
   end
 
@@ -799,6 +812,7 @@ defmodule Xandra do
   end
 
   defp execute_without_retrying(conn, %Simple{} = query, params, options) do
+    {conn, options} = unwrap(conn, options)
     with {:ok, %Error{} = error} <- DBConnection.execute(conn, query, params, options) do
       {:error, error}
     end
@@ -853,5 +867,27 @@ defmodule Xandra do
       [address] ->
         {String.to_charlist(address), @default_port}
     end
+  end
+
+  @compile {:inline, [unwrap: 2]}
+
+  defp unwrap(%__MODULE__{conn: conn, pool: pool}, options) do
+    options =
+      if is_nil(pool) do
+        options
+      else
+        [pool: pool] ++ options
+      end
+
+    {conn, options}
+  end
+
+  defp unwrap(%DBConnection{} = conn, options) do
+    {conn, options}
+  end
+
+  defp unwrap(name, options) do
+    pool = __MODULE__.Registry.lookup(name)
+    {name, [pool: pool] ++ options}
   end
 end
