@@ -166,9 +166,10 @@ defmodule Xandra do
   @default_start_options [
     nodes: ["127.0.0.1"],
     idle_timeout: 30_000,
+    pool: DBConnection.Connection
   ]
 
-  defstruct [:conn, :pool]
+  defstruct [:pid, call_options: []]
 
   @doc """
   Starts a new connection or pool of connections to Cassandra.
@@ -258,15 +259,15 @@ defmodule Xandra do
       |> Keyword.merge(options)
       |> parse_start_options()
       |> Keyword.put(:prepared_cache, Prepared.Cache.new)
-      # |> Keyword.put_new(:pool, DBConnection.Connection)
 
-    with {:ok, conn} <- DBConnection.start_link(Connection, options) do
-      pool = Keyword.get(options, :pool)
+    with {:ok, pid} <- DBConnection.start_link(Connection, options) do
+      call_options = [pool: Keyword.fetch!(options, :pool)]
+
       if name = Keyword.get(options, :name) do
-        __MODULE__.Registry.associate(name, pool)
+        __MODULE__.Registry.associate(name, call_options)
       end
 
-      {:ok, %__MODULE__{conn: conn, pool: pool}}
+      {:ok, %__MODULE__{pid: pid, call_options: call_options}}
     end
   end
 
@@ -842,17 +843,28 @@ defmodule Xandra do
 
   defp parse_start_options(options) do
     cluster? = options[:pool] == Xandra.Cluster
-    Enum.flat_map(options, fn
-      {:nodes, nodes} when cluster? ->
-        [nodes: Enum.map(nodes, &parse_node/1)]
-      {:nodes, [string]} ->
-        {address, port} = parse_node(string)
-        [address: address, port: port]
-      {:nodes, _nodes} ->
-        raise ArgumentError, "multi-node use requires the :pool option to be set to Xandra.Cluster"
-      {_key, _value} = option ->
-        [option]
-    end)
+
+    options =
+      Enum.flat_map(options, fn
+        {:nodes, nodes} when cluster? ->
+          [nodes: Enum.map(nodes, &parse_node/1)]
+
+        {:nodes, [string]} ->
+          {address, port} = parse_node(string)
+          [address: address, port: port]
+
+        {:nodes, _nodes} ->
+          raise ArgumentError, "multi-node use requires the :pool option to be set to Xandra.Cluster"
+
+        {_key, _value} = option ->
+          [option]
+      end)
+
+    if cluster? do
+      Keyword.put_new(options, :underlying_pool, @default_start_options[:pool])
+    else
+      options
+    end
   end
 
   defp parse_node(string) do
@@ -871,15 +883,8 @@ defmodule Xandra do
 
   @compile {:inline, [unwrap: 2]}
 
-  defp unwrap(%__MODULE__{conn: conn, pool: pool}, options) do
-    options =
-      if is_nil(pool) do
-        options
-      else
-        [pool: pool] ++ options
-      end
-
-    {conn, options}
+  defp unwrap(%__MODULE__{pid: pid, call_options: call_options}, options) do
+    {pid, call_options ++ options}
   end
 
   defp unwrap(%DBConnection{} = conn, options) do
@@ -887,7 +892,7 @@ defmodule Xandra do
   end
 
   defp unwrap(name, options) do
-    pool = __MODULE__.Registry.lookup(name)
-    {name, [pool: pool] ++ options}
+    call_options = __MODULE__.Registry.lookup(name)
+    {name, call_options ++ options}
   end
 end

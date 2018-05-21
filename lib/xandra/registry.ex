@@ -7,8 +7,8 @@ defmodule Xandra.Registry do
     GenServer.start_link(__MODULE__, nil, [name: __MODULE__])
   end
 
-  def associate(name, pool) do
-    :ets.insert(__MODULE__, {name, pool})
+  def associate(name, call_options) do
+    :ets.insert(__MODULE__, {name, call_options})
   end
 
   def lookup(name) do
